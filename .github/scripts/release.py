@@ -22,7 +22,7 @@ PROPS = ROOT / "Directory.Build.props"
 CSPROJ = ROOT / "Jellyfin.Plugin.Chromecast" / "Jellyfin.Plugin.Chromecast.csproj"
 BUILD_YAML = ROOT / "build.yaml"
 README = ROOT / "README.md"
-REPO = "DD00031/jellyfin-plugin-chromecast"
+REPO = "saffsd/jellyfin-plugin-chromecast"
 
 
 def fail(message: str) -> None:
@@ -56,9 +56,11 @@ def prepare() -> None:
         parts = [int(p) for p in latest.split(".")]
         parts[-1] += 1
         version = ".".join(str(p) for p in parts)
-    if not re.fullmatch(r"\d+\.\d+\.\d+\.\d+", version):
-        fail(f"Plugin version must look like 0.1.4.0, got {version!r}")
-    if [int(p) for p in version.split(".")] <= [int(p) for p in latest.split(".")]:
+    if not re.fullmatch(r"\d+\.\d+\.\d+\.\d+(-[a-zA-Z0-9]+)?", version):
+        fail(f"Plugin version must look like 0.1.4.0 or 0.1.4.0-suffix, got {version!r}")
+    version_parts = [int(p) for p in version.split("-")[0].split(".")]
+    latest_parts = [int(p) for p in latest.split("-")[0].split(".")]
+    if version_parts <= latest_parts:
         fail(f"Plugin version {version} must be newer than the latest release {latest}")
 
     target_abi = f"{jellyfin}.0"
@@ -75,7 +77,7 @@ def prepare() -> None:
     replace_once(BUILD_YAML, r'^version: "[^"]*"', f'version: "{version}"')
     replace_once(BUILD_YAML, r'^targetAbi: "[^"]*"', f'targetAbi: "{target_abi}"')
     replace_once(BUILD_YAML, r"^changelog: >\n", f"changelog: >\n  {version}: {changelog}\n\n")
-    replace_once(README, r"early public test release \([0-9.]+\)", f"early public test release ({version})")
+    replace_once(README, r"early public test release \([0-9.]+(?:-[a-zA-Z0-9]+)?\)", f"early public test release ({version})")
 
     print(f"Plugin {latest} -> {version}, built against Jellyfin {jellyfin} (targetAbi {target_abi})")
     output("version", version)

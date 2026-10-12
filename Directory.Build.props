@@ -1,7 +1,7 @@
 <Project>
     <PropertyGroup>
-        <Version>0.1.6.0</Version>
+        <Version>0.1.6.0-saffsd</Version>
         <AssemblyVersion>0.1.6.0</AssemblyVersion>
-        <FileVersion>0.1.6.0</FileVersion>
+        <FileVersion>0.1.6.0-saffsd</FileVersion>
     </PropertyGroup>
 </Project>

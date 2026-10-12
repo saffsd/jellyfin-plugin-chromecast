@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/DD00031/jellyfin-plugin-chromecast/main/assets/logo.jpg",
     "versions": [
       {
+        "version": "0.1.6.0-saffsd",
+        "changelog": "Fork of 0.1.6.0 with version suffix for identification.",
+        "targetAbi": "12.0.0.0",
+        "sourceUrl": "https://github.com/saffsd/jellyfin-plugin-chromecast/releases/download/v0.1.6.0-saffsd/Jellyfin.Plugin.Chromecast_0.1.6.0-saffsd.zip",
+        "checksum": "00000000000000000000000000000000",
+        "timestamp": "2026-10-13T00:00:00.0000000Z"
+      },
+      {
         "version": "0.1.6.0",
         "changelog": "A Chromecast that is switched off or unplugged is now noticed within seconds: the settings page shows its real status and it leaves the cast menu, also when it has a custom name. The ready screen appears again on the first connect after a Chromecast restarted. The TV goes back to the ready screen 30 seconds after showing a movie's details instead of staying on them. A video you move from the app's player to the Chromecast keeps playing when you close the player. Every command to a Chromecast now has a time limit, so a device that stops answering can no longer leave the app waiting. New setting: skip the Chromecast's network speed test for a faster start on fast, steady networks (off by default). Works on Jellyfin 12.0, 12.1 and 12.2.",
         "targetAbi": "12.0.0.0",
