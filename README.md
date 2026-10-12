@@ -25,6 +25,8 @@ app already has. Pick one, press Play, and it plays on the TV.
 - Chromecasts show up in the cast menu of every Jellyfin app, with no setup on the phone or TV.
 - Video the Chromecast can't play (H.265/HEVC on older models, for example) is converted
   automatically.
+- Dolby audio (AC-3 and E-AC-3) is converted automatically when the Chromecast can't really play
+  it, which is common - see [Good to know](#good-to-know).
 - Play, pause, seek, skip, volume, stop, the play queue, and switching audio or subtitle tracks all
   work from the app.
 - Subtitles work, including `.srt` files that sit next to the video.
@@ -83,6 +85,7 @@ show Jellyfin's ready screen on it for a few seconds.
 | Show the ready screen when you connect | On by default. Opens Jellyfin on the TV as soon as you connect, before you play anything. |
 | Skip the network speed test | Off by default. The Chromecast normally measures its connection to your server before the first video, which takes several seconds. Turn this on if your network is fast and steady, for a quicker start. Leave it off on slow or unreliable Wi-Fi, where the measurement prevents stuttering. |
 | Bitrate when the speed test is skipped | Default 20 Mbps, which suits a 1080p Chromecast on good Wi-Fi. Lower it if video stutters; raise it for a 4K Chromecast on a fast network. |
+| Transcode Dolby audio (AC-3 and E-AC-3) | On by default. Leave it on: see [Dolby audio files won't play](#dolby-audio-files-wont-play). |
 | Verbose logging | Off by default. Writes every discovery scan and every message to the server log; turn it on when reporting a problem. |
 
 ## Good to know
@@ -106,6 +109,13 @@ show Jellyfin's ready screen on it for a few seconds.
   network, and the server must not be behind a VPN that hides local devices. A Chromecast powered
   from the TV's USB port is off when the TV is off. One that is switched off leaves the menu after
   about a minute and comes back within half a minute of being switched on.
+- **Dolby audio files won't play.** If an AC-3 (Dolby Digital) or E-AC-3 (Dolby Digital Plus) file
+  starts and stops immediately with nothing on screen, leave **Transcode Dolby audio** switched on
+  in the plugin settings (it is on by default). A Chromecast decides whether it can play Dolby
+  audio from what the TV or receiver reports over HDMI, and that answer is often wrong; when it is,
+  the server sends the raw Dolby track inside the stream and the Chromecast refuses it. With the
+  setting on, the server converts just the audio and copies the video as-is, so it stays cheap even
+  on a modest server. This does not affect files that can be sent straight through.
 - **After updating Jellyfin**, the plugin normally keeps working. This repository checks itself
   against every new Jellyfin release daily and opens an issue if a release breaks it.
 

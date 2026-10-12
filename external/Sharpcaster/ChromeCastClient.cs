@@ -58,6 +58,9 @@ namespace Sharpcaster
         private static readonly Action<ILogger, Exception?> LogHeartbeatTimeout =
             LoggerMessage.Define(LogLevel.Error, new EventId(4003, "HeartbeatTimeout"), "Heartbeat timeout - Disconnecting client.");
 
+        private static readonly Action<ILogger, Exception?> LogDisconnectFailed =
+            LoggerMessage.Define(LogLevel.Debug, new EventId(4010, "DisconnectFailed"), "Disconnecting after a heartbeat timeout failed - the connection is already gone.");
+
         private static readonly Action<ILogger, string, Exception?> LogReceivedMessage =
             LoggerMessage.Define<string>(LogLevel.Trace, new EventId(4004, "ReceivedMessage"), "RECEIVED: {Payload}");
 
@@ -205,8 +208,18 @@ namespace Sharpcaster
 
         private async void HeartBeatTimedOut(object sender, EventArgs e)
         {
-            if (_logger != null) LogHeartbeatTimeout(_logger, null);
-            await DisconnectAsync().ConfigureAwait(false);
+            // Patch: async void event handler. DisconnectAsync can throw while tearing down a
+            // connection that is already broken, and an exception escaping here is rethrown on
+            // the ThreadPool and terminates the process. See PATCH.md.
+            try
+            {
+                if (_logger != null) LogHeartbeatTimeout(_logger, null);
+                await DisconnectAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                if (_logger != null) LogDisconnectFailed(_logger, ex);
+            }
         }
 
         private void Receive(CancellationToken cancellationToken) => Task.Run(async () =>

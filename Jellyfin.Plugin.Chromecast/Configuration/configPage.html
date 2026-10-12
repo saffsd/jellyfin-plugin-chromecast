@@ -77,6 +77,14 @@
 
                     <div class="checkboxContainer checkboxContainer-withDescription">
                         <label>
+                            <input id="TranscodeDolbyAudio" name="TranscodeDolbyAudio" type="checkbox" is="emby-checkbox" />
+                            <span>Transcode Dolby audio (AC-3 and E-AC-3)</span>
+                        </label>
+                        <div class="fieldDescription">On by default. A Chromecast decides whether it can play Dolby audio (AC-3 / Dolby Digital, and E-AC-3 / Dolby Digital Plus) from what the TV or receiver reports over HDMI, and that answer is often wrong. When it is, the server sends the raw Dolby track inside the stream and playback starts and stops immediately with nothing on screen. With this on, the server converts that audio instead, so those files play. Only the audio is converted and the video is copied as-is, so it stays cheap to run. Files that can be sent straight through without converting are left alone.</div>
+                    </div>
+
+                    <div class="checkboxContainer checkboxContainer-withDescription">
+                        <label>
                             <input id="EnableDebugLogging" name="EnableDebugLogging" type="checkbox" is="emby-checkbox" />
                             <span>Enable verbose logging</span>
                         </label>
@@ -227,6 +235,7 @@
                         page.querySelector('#EnableDebugLogging').checked = config.EnableDebugLogging;
                         page.querySelector('#SkipSpeedTest').checked = config.SkipSpeedTest;
                         page.querySelector('#StreamingBitrateMbps').value = config.StreamingBitrateMbps;
+                        page.querySelector('#TranscodeDolbyAudio').checked = config.TranscodeDolbyAudio;
                         loadDevices(page, config).then(function () {
                             Dashboard.hideLoadingMsg();
                         });
@@ -244,6 +253,7 @@
                         config.EnableDebugLogging = page.querySelector('#EnableDebugLogging').checked;
                         config.SkipSpeedTest = page.querySelector('#SkipSpeedTest').checked;
                         config.StreamingBitrateMbps = Number(page.querySelector('#StreamingBitrateMbps').value) || 20;
+                        config.TranscodeDolbyAudio = page.querySelector('#TranscodeDolbyAudio').checked;
                         config.DeviceSettings = collectDeviceSettings(page, config);
 
                         ApiClient.updatePluginConfiguration(pluginId, config).then(function (result) {

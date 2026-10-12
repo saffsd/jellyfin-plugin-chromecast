@@ -19,6 +19,7 @@ public class PluginConfiguration : BasePluginConfiguration
         OpenReceiverOnConnect = true;
         SkipSpeedTest = false;
         StreamingBitrateMbps = 20;
+        TranscodeDolbyAudio = true;
         LastCastTargets = [];
         DeviceSettings = [];
         EnableDebugLogging = false;
@@ -69,6 +70,17 @@ public class PluginConfiguration : BasePluginConfiguration
     /// Gets or sets the bitrate, in megabits per second, used when <see cref="SkipSpeedTest"/> is on.
     /// </summary>
     public int StreamingBitrateMbps { get; set; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether the Dolby audio codecs (AC-3 and E-AC-3) are
+    /// removed from the transcoding profiles a casting Chromecast sends to Jellyfin, so that
+    /// audio is transcoded rather than copied into fMP4 HLS segments. On by default: a Cast
+    /// device's Dolby support comes from the display's HDMI EDID and is often wrong, in which
+    /// case playback starts and stops immediately at position 0 with no error. Direct play of a
+    /// Dolby track is unaffected - that path uses the platform demuxer and works. Only the audio
+    /// is re-encoded and the video stream is copied, so this stays cheap on a low-powered server.
+    /// </summary>
+    public bool TranscodeDolbyAudio { get; set; }
 
     /// <summary>
     /// Gets or sets the Chromecast each user cast to last. Maintained by the plugin, not shown in

@@ -206,6 +206,10 @@ Jellyfin.Plugin.Chromecast/
     ConnectSdkMessages.cs                     - DTOs for the connectsdk message shapes above
   Api/
     ChromecastController.cs                   - admin API for the settings page (device list, test)
+  Playback/
+    DolbyAudioTranscodeFilter.cs              - strips AC-3/E-AC-3 from a casting Chromecast's
+                                                 transcoding profiles so Jellyfin re-encodes that audio
+                                                 instead of copying it into fMP4 HLS (see below)
   Cast/CastTimeout.cs                         - timeout wrapper for every call to the device
   Session/
     RemoteSubscriptions.cs                    - connect/disconnect detection logic (pure, unit-tested)
@@ -909,6 +913,93 @@ matching codec profile, so every H.264 file fails with `VideoProfileNotSupported
 transcoded. The unstable receiver direct-streams H.264 (seen with Caminandes) - another reason for
 the unstable default.
 
+### RESOLVED (2026-10-12): Jellyfin restart loop - an `async void` heartbeat failure killed the process
+
+Reported from real use as "the plugin sends Jellyfin into a restart loop". Reproduced and fixed
+after the cause turned out to be nothing to do with discovery, sessions or casting, where every
+previous investigation had looked.
+
+**Symptom.** Jellyfin restarts itself over and over. Critically, the *container* never exits, so
+`docker ps` shows a healthy container and `docker inspect ... RestartCount` stays at `0` - the
+process is replaced in place by the supervisor. Count startups instead:
+`docker logs <container> | grep -c "Startup complete"`. On the affected server this reached 56 in
+one day.
+
+**Cause.** Sharpcaster's `HeartbeatChannel.TimerElapsed` is an `async void` timer callback. It
+awaits `SendAsync`, which writes to the Cast socket. When the Chromecast has gone away (TV input
+changed, receiver closed, device slept) the socket is left half-open and the write raises
+`IOException: ... Broken pipe`. Nothing caught it, so it was rethrown on the ThreadPool and
+terminated the whole Jellyfin process - there is no top-level handler for ThreadPool work in a
+Jellyfin plugin host, so an escaping `async void` exception is fatal by construction. Log signature:
+
+```
+[FTL] Main: Unhandled Exception
+Unhandled exception. System.IO.IOException: Unable to write data to the transport connection: Broken pipe
+   at Sharpcaster.ChromecastClient.SendAsync(...) ChromeCastClient.cs:line 349
+   at Sharpcaster.Channels.HeartbeatChannel.TimerElapsed(...) HeartbeatChannel.cs:line 122
+   at System.Timers.Timer.MyTimerCallback(Object state)
+```
+
+It always appears about one line after `Chromecast <name> app keep-alive failed`, which is why the
+loop correlated with remote-player connects: connecting opens the receiver, and the connection then
+drops when the user stops watching or changes input.
+
+**Why earlier attempts failed to reproduce it.** Every trigger tried was a *plugin* action (casts,
+connect/disconnect cycles, DisplayContent, volume, hammering) - none of which break the socket. The
+trigger is the device *going away mid-connection*, which needs either real use or a deliberate
+network kill. Note also that a container-restart watch (the obvious approach, and what was tried
+first) cannot see this at all, because the container is never restarted.
+
+**Fix.** Guarded all three `async void` methods in the vendored Sharpcaster so a failed write is
+treated as what it means - the connection is gone: one Debug log line, raise `StatusChanged` so the
+client disconnects cleanly and reconnects on the next command. See `external/Sharpcaster/PATCH.md`
+patch 6. Verified by killing the network path to a real Chromecast mid-playback for 75 s: before the
+fix, `[FTL]` + restart within ~2 s; after, startup count unchanged and the guard logged instead.
+
+**Rule for anything added to this library:** an exception escaping any `async void` takes Jellyfin
+down with it. Never add one unguarded.
+
+### RESOLVED (2026-10-12): AC-3/E-AC-3 files started and stopped immediately (0 ms)
+
+Dolby audio files would begin playback and stop instantly at position 0, with nothing on screen and
+no error. Plain AAC, MP3 and DTS were unaffected, which made it look codec-specific in a confusing
+way.
+
+**Cause.** The Cast receiver builds its device profile *on the device* and advertises AC-3/E-AC-3
+support based on `castContext.canDisplayType()`, which answers from the display's HDMI EDID - and is
+frequently wrong. When it wrongly says yes, Jellyfin sees no reason to touch the audio and
+stream-copies the raw Dolby bitstream. For anything needing a container change (mkv, avi, ts -> fMP4
+HLS) that copy lands inside **fMP4 HLS segments**, and HLS in the receiver plays through MSE, which
+refuses audio the platform demuxer would have handled. The tell is `-codec:a:0 copy` in the ffmpeg
+line. Direct play of a Dolby track is fine (a complete MP4 uses the platform demuxer, not MSE) -
+verified: mp4+E-AC-3 direct-plays and plays.
+
+**Fix.** `Playback/DolbyAudioTranscodeFilter.cs` - an MVC action filter, registered through
+`Configure<MvcOptions>` (plugins register before Jellyfin calls `AddJellyfinApi`, so options
+configuration composes in either order). It runs on every controller action, and when the
+authenticated client is `Chromecast` - the identity this plugin mints for the receiver - it removes
+the Dolby codecs from the device profile the request carries, reading the `DeviceProfile` property by
+reflection because `Jellyfin.Api` is not a plugin dependency. It edits **only**
+`TranscodingProfiles`, never `DirectPlayProfiles`, so a fully compatible file keeps the cheap
+direct-play path. Jellyfin then reports `AudioCodecNotSupported` and re-encodes the audio alone:
+`-codec:v:0 copy -codec:a:0 libfdk_aac`. Config toggle `TranscodeDolbyAudio`, default on.
+
+Audio-only transcoding measured ~45x realtime, versus ~0.87x for a full 1080p video re-encode on a
+weak CPU - which is why an earlier attempt that capped the bitrate (forcing a video re-encode) was
+the wrong shape and was retired.
+
+**Scope, measured on a 218-file stratified sample of a 2536-file / 1.7 TB library:** AC-3 48% of
+files, AAC 25%, MP3 18%, E-AC-3 10%, DTS 0.5%; containers mkv 47%, avi 34%, mp4 18%, ts 1.4%. 57%
+of files carry AC-3 or E-AC-3, so this was the dominant failure mode. All 11 distinct
+(container, video, audio) combinations found were cast to real hardware and all 11 played.
+
+**Testing trap worth remembering:** the plugin's `SkipSpeedTest`/`StreamingBitrateMbps` settings
+change whether Jellyfin direct-plays or transcodes, which changes the outcome. With the speed test
+on and a low cap, even a Dolby file that would direct-play gets forced into the failing HLS path;
+with a high ceiling it direct-plays and works even with the fix off. Always control for this, or the
+fix appears to do nothing. To force the failing path deliberately: skip the speed test and set the
+bitrate *below* the file's own bitrate.
+
 ### Still open
 
 - **Stable receiver can't load external subtitle files** until upstream tags a release containing
@@ -921,7 +1012,17 @@ the unstable default.
   untested (12.0 and 12.2 are).
 - Consider proposing the Sharpcaster patches upstream (see `external/Sharpcaster/PATCH.md`)
   to eventually drop the vendoring. The 5 s keep-alive tick is no longer optional hardening: the
-  idle close and the stalled-play-request check run from it.
+  idle close and the stalled-play-request check run from it. Patch 6 (the `async void` guards) is
+  the strongest candidate for upstreaming on its own - it is a crash in the library, not a
+  Jellyfin-specific behaviour.
+- The Dolby fix is a workaround for a *receiver* bug, not a root-cause fix: the receiver should not
+  advertise AC-3/E-AC-3 when the HDMI chain cannot decode them. Worth revisiting if
+  jellyfin-chromecast ever fixes its `canDisplayType()` handling, at which point
+  `DolbyAudioTranscodeFilter` could be retired or narrowed.
+- The restart loop's *self-sustaining* behaviour on the affected server (56 startups in a day, long
+  after the user stopped casting) was not fully explained - the trigger is a dropped connection, but
+  why it kept recurring unattended was never measured. The `async void` fix removes the fatality, so
+  the loop should be broken regardless; worth confirming over a few days of real use.
 - The Jellyfin dashboard's own "Stop" button was reported not working during testing - the user
   confirmed this is a pre-existing Jellyfin UI issue unrelated to this plugin.
 

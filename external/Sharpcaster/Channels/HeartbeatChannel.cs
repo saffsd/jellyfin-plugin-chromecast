@@ -38,6 +38,9 @@ namespace Sharpcaster.Channels
         private static readonly Action<ILogger, Exception?> LogPingSent =
             LoggerMessage.Define(LogLevel.Debug, new EventId(1008, nameof(OnMessageReceived)), "Ping sent - Heartbeat Timer restarted.");
 
+        private static readonly Action<ILogger, Exception?> LogHeartbeatSendFailed =
+            LoggerMessage.Define(LogLevel.Debug, new EventId(1009, nameof(TimerElapsed)), "Heartbeat ping could not be sent - treating the connection as lost.");
+
         /// <summary>
         /// Initializes a new instance of HeartbeatChannel class
         /// </summary>
@@ -70,24 +73,36 @@ namespace Sharpcaster.Channels
         /// <param name="type">message type</param>
         public override async void OnMessageReceived(string messagePayload, string type)
         {
-            if (type == "PONG")
+            // Patch: same hazard as TimerElapsed - this is an async void event handler reached
+            // from the receive loop, and SendAsync throws once the socket is half-open. An
+            // exception escaping here is rethrown on the ThreadPool and kills the process.
+            // See PATCH.md.
+            try
             {
-                _triedToPing = false;
+                if (type == "PONG")
+                {
+                    _triedToPing = false;
+                    _timer.Stop();
+                    _timer.Start();
+                    if (Logger != null) LogPongReceived(Logger, null);
+                    return;
+                }
                 _timer.Stop();
-                _timer.Start();
-                if (Logger != null) LogPongReceived(Logger, null);
-                return;
-            }
-            _timer.Stop();
-            var pongJson = JsonSerializer.Serialize(new PongMessage(), SharpcasteSerializationContext.Default.PongMessage);
-            await SendAsync(pongJson).ConfigureAwait(false);
-            if (AdditionalDestinationId is not null)
-            {
-                await SendAsync(pongJson, AdditionalDestinationId).ConfigureAwait(false);
-            }
+                var pongJson = JsonSerializer.Serialize(new PongMessage(), SharpcasteSerializationContext.Default.PongMessage);
+                await SendAsync(pongJson).ConfigureAwait(false);
+                if (AdditionalDestinationId is not null)
+                {
+                    await SendAsync(pongJson, AdditionalDestinationId).ConfigureAwait(false);
+                }
 
-            _timer.Start();
-            if (Logger != null) LogPongSent(Logger, null);
+                _timer.Start();
+                if (Logger != null) LogPongSent(Logger, null);
+            }
+            catch (Exception ex)
+            {
+                if (Logger != null) LogHeartbeatSendFailed(Logger, ex);
+                SafeInvokeEvent(StatusChanged, this, EventArgs.Empty);
+            }
         }
 
         public void StartTimeoutTimer()
@@ -112,27 +127,46 @@ namespace Sharpcaster.Channels
 
         private async void TimerElapsed(object sender, ElapsedEventArgs e)
         {
-            if (_triedToPing)
+            // Patch: this is an async void timer callback, so an exception escaping it is
+            // rethrown on the ThreadPool and terminates the whole process - Jellyfin included,
+            // since this library runs in-process. Sending the ping fails routinely in normal
+            // operation: a Chromecast that has gone away (switched off, TV input changed,
+            // receiver closed) leaves the socket half-open, so the write raises IOException
+            // "Broken pipe" the first time the heartbeat fires afterwards. Observed in
+            // production as a Jellyfin restart loop. Treat it as the connection being gone -
+            // report the timeout so the client tears the connection down - and never let it
+            // escape. See PATCH.md.
+            try
             {
-                if (Logger != null) LogHeartbeatTimeout(Logger, null);
-                SafeInvokeEvent(StatusChanged, this, e);
-                return;
-            }
-            var pingJson = JsonSerializer.Serialize(new PingMessage(), SharpcasteSerializationContext.Default.PingMessage);
-            await SendAsync(pingJson).ConfigureAwait(false);
-            if (AdditionalDestinationId is not null)
-            {
-                await SendAsync(pingJson, AdditionalDestinationId).ConfigureAwait(false);
-            }
+                if (_triedToPing)
+                {
+                    if (Logger != null) LogHeartbeatTimeout(Logger, null);
+                    SafeInvokeEvent(StatusChanged, this, e);
+                    return;
+                }
+                var pingJson = JsonSerializer.Serialize(new PingMessage(), SharpcasteSerializationContext.Default.PingMessage);
+                await SendAsync(pingJson).ConfigureAwait(false);
+                if (AdditionalDestinationId is not null)
+                {
+                    await SendAsync(pingJson, AdditionalDestinationId).ConfigureAwait(false);
+                }
 
-            _triedToPing = true;
-            // Patch: _timer.AutoReset is false, so without restarting it here the timer never
-            // fires again after this one unanswered ping - the "did the device actually respond"
-            // check on the next elapse (the _triedToPing branch above) would never run, silently
-            // disabling heartbeat timeout detection for the rest of the connection's life. See
-            // PATCH.md.
-            _timer.Start();
-            if (Logger != null) LogPingSent(Logger, null);
+                _triedToPing = true;
+                // Patch: _timer.AutoReset is false, so without restarting it here the timer never
+                // fires again after this one unanswered ping - the "did the device actually respond"
+                // check on the next elapse (the _triedToPing branch above) would never run, silently
+                // disabling heartbeat timeout detection for the rest of the connection's life. See
+                // PATCH.md.
+                _timer.Start();
+                if (Logger != null) LogPingSent(Logger, null);
+            }
+            catch (Exception ex)
+            {
+                // The ping could not be written, so the connection is not usable. Raise the
+                // timeout so the client disconnects cleanly and reconnects on the next command.
+                if (Logger != null) LogHeartbeatSendFailed(Logger, ex);
+                SafeInvokeEvent(StatusChanged, this, e);
+            }
         }
 
         protected virtual void Dispose(bool disposing)

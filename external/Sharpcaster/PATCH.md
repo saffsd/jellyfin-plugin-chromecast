@@ -2,11 +2,12 @@
 
 This is a vendored copy of the `Sharpcaster` library project from
 [Tapanila/SharpCaster](https://github.com/Tapanila/SharpCaster) (MIT license, see `LICENSE.txt`),
-trimmed to just the library itself (no tests/samples/CI), with **four small patches**, all found
+trimmed to just the library itself (no tests/samples/CI), with **six small patches**, all found
 by actually casting to real hardware - none were obvious from reading the code alone. Patch 4 is
 the one that actually explains and fixes the "connection doesn't survive between commands" issue
-CLAUDE.md describes at length - patches 2 and 3 are real, confirmed bugs found along the way, but
-turned out not to be the cause of that particular symptom.
+CLAUDE.md describes at length - patches 2, 3 and 5 are real, confirmed bugs found along the way,
+but turned out not to be the cause of that particular symptom. Patch 6 is unrelated to any of
+those: it stops the library taking the whole Jellyfin process down with it.
 
 ## Why vendored instead of the NuGet package
 
@@ -109,10 +110,43 @@ several times per cast. The envelope deserialization into `MessageWithId` now ca
 `JsonException` itself, logs one Debug line (`Skipped unparseable message on {namespace}`), and
 moves on. Nothing ever waits on those broadcasts, so skipping them loses nothing.
 
+### 6. An `async void` heartbeat failure killed the entire Jellyfin process
+
+The most serious one, and the only patch here that is about the host application rather than the
+Cast connection. `HeartbeatChannel.TimerElapsed` is an `async void` timer callback; it awaits
+`SendAsync`, which writes to the Cast socket. When the device has gone away - TV switched off,
+input changed, receiver closed, device slept - the socket is left half-open and that write raises
+`IOException: Unable to write data to the transport connection: Broken pipe`. Nothing caught it,
+so the exception was rethrown on the ThreadPool and **terminated the whole Jellyfin process**.
+There is no top-level handler for ThreadPool work in a Jellyfin plugin host, so this is fatal by
+construction:
+
+```
+System.IO.IOException: Unable to write data to the transport connection: Broken pipe
+ ---> System.Net.Sockets.SocketException (32): Broken pipe
+   at Sharpcaster.ChromecastClient.SendAsync(...) ChromeCastClient.cs:line 349
+   at Sharpcaster.Channels.HeartbeatChannel.TimerElapsed(...) HeartbeatChannel.cs:line 122
+   at System.Timers.Timer.MyTimerCallback(Object state)
+```
+
+Seen in production as a Jellyfin **restart loop**: every time the heartbeat fired against a dead
+connection, Jellyfin died and came back (a new `Loaded plugin` / `Startup complete` pair in the
+log), which is easy to misread as a network or plugin-discovery problem. Two other `async void`
+methods carried the same latent hazard and are guarded for the same reason:
+`HeartbeatChannel.OnMessageReceived` (a PONG reply to a dead socket) and
+`ChromeCastClient.HeartBeatTimedOut` (disconnecting an already-broken connection can itself throw).
+
+Each is now wrapped so a failure is treated as what it actually means - the connection is gone:
+log one Debug line, raise `StatusChanged` so the client disconnects cleanly and reconnects on the
+next command, and never let the exception escape.
+
+**Rule for anything added to this library:** an exception escaping any `async void` takes Jellyfin
+down with it. Never add one unguarded.
+
 ## Keeping this in sync with upstream
 
 To pull in upstream fixes, re-copy `Sharpcaster/` from a fresh clone of the upstream repo and
-re-apply all four patches above:
+re-apply all six patches above:
 - `AddChannel` - search for `GetChannel<TChannel>` in `ChromeCastClient.cs`, add it directly after.
 - The receive-loop dispatch change (turning a silent drop into a real dispatch for unrecognized
   types) - search for `LogMessageConversionError` in the same file.
@@ -121,6 +155,9 @@ re-apply all four patches above:
 - The per-message try/catch in the receive loop - search for `LogExceptionProcessingResponse` in
   `ChromeCastClient.cs`; the fix wraps everything between the namespace lookup and the end of the
   `while` loop body in its own try/catch.
+- The `async void` guards - search for `async void` in `Channels/HeartbeatChannel.cs` and
+  `ChromeCastClient.cs`; every one must have a try/catch that treats a failure as a lost
+  connection. Do not merge a re-copy without checking this.
 
 These are small enough, self-contained changes that they may be worth proposing upstream as a PR
 at some point, which would let us drop the vendoring entirely.
