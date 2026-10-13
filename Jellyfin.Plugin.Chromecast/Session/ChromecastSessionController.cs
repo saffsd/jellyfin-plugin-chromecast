@@ -150,6 +150,13 @@ public sealed class ChromecastSessionController : ISessionController, IAsyncDisp
     /// </summary>
     private volatile bool _receiverHasItem = true;
 
+    /// <summary>
+    /// The item the receiver was last seen playing. The receiver blanks <c>ItemId</c> in the
+    /// <c>playbackstop</c> it broadcasts when a clip reaches its end, so this is the only thing
+    /// left to identify what finished.
+    /// </summary>
+    private Guid _reportedItemId;
+
     private bool _disposed;
     private volatile bool _stale;
 
@@ -1454,6 +1461,11 @@ public sealed class ChromecastSessionController : ISessionController, IAsyncDisp
             Guid.TryParse(reportedItem.GetString(), out reportedItemId);
         }
 
+        if (reportedItemId != Guid.Empty)
+        {
+            _reportedItemId = reportedItemId;
+        }
+
         OnReceiverReported(status.Type, reportedItemId);
 
         try
@@ -1534,6 +1546,27 @@ public sealed class ChromecastSessionController : ISessionController, IAsyncDisp
             return Task.CompletedTask;
         }
 
+        // When a clip plays through to its end the receiver broadcasts playbackstop with
+        // ItemId blanked to "". Jellyfin's OnPlaybackStopped looks the item up by id, gets
+        // nothing back for an empty one, and returns *before* it ever clears NowPlayingItem -
+        // so the session is left reporting a finished item as still playing, for good. Fall
+        // back to the item the receiver was last seen playing so the stop can actually land.
+        if (info.ItemId == Guid.Empty)
+        {
+            // What the receiver was last seen playing, or failing that what the server itself
+            // believes is on screen - either identifies the item that just finished.
+            var fallback = ResolveStoppedItemId(info.ItemId, _reportedItemId, _session.NowPlayingItem?.Id ?? Guid.Empty);
+            if (fallback == Guid.Empty)
+            {
+                _logger.LogWarning("Chromecast {Name} reported a stop with no item, and nothing is known to have been playing; leaving the session as it is", _receiver.Name);
+                return Task.CompletedTask;
+            }
+
+            _logger.LogDebug("Chromecast {Name} reported a stop with no item; treating it as {ItemId}, which was playing", _receiver.Name, fallback);
+            info.ItemId = fallback;
+            info.MediaSourceId ??= fallback.ToString("N", CultureInfo.InvariantCulture);
+        }
+
         return _sessionManager.OnPlaybackStopped(new PlaybackStopInfo
         {
             ItemId = info.ItemId,
@@ -1560,6 +1593,27 @@ public sealed class ChromecastSessionController : ISessionController, IAsyncDisp
             _logger.LogDebug(ex, "Could not parse playback status from Chromecast receiver: {Data}", playState.GetRawText());
             return null;
         }
+    }
+
+    /// <summary>
+    /// Works out which item a receiver status refers to when the receiver left <c>ItemId</c> blank.
+    /// The receiver blanks it in the <c>playbackstop</c> broadcast it sends as a clip reaches its
+    /// end; without a fallback that stop is dropped and the session keeps reporting a finished item
+    /// as playing. Prefers the item the receiver was last seen playing, then the item the server
+    /// believes is on screen, then nothing (in which case the stop must be left alone).
+    /// </summary>
+    /// <param name="reported">The item id from the broadcast itself (empty when blanked).</param>
+    /// <param name="lastSeenPlaying">The last non-empty item id the receiver reported.</param>
+    /// <param name="sessionNowPlaying">The item the session currently reports as playing.</param>
+    /// <returns>The item the stop refers to, or <see cref="Guid.Empty"/> if it cannot be determined.</returns>
+    internal static Guid ResolveStoppedItemId(Guid reported, Guid lastSeenPlaying, Guid sessionNowPlaying)
+    {
+        if (reported != Guid.Empty)
+        {
+            return reported;
+        }
+
+        return lastSeenPlaying != Guid.Empty ? lastSeenPlaying : sessionNowPlaying;
     }
 
     private void OnClientDisconnected(object? sender, EventArgs e)
