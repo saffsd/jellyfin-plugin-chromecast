@@ -1,7 +1,7 @@
 ---
 name: "Chromecast"
 guid: "06afff54-6a74-4e08-9d50-9fa63803c73d"
-version: "0.1.6.0-saffsd"
+version: "0.1.6.1"
 targetAbi: "12.0.0.0"
 framework: "net10.0"
 owner: "saffsd"
@@ -17,7 +17,7 @@ category: "General"
 artifacts:
 - "Jellyfin.Plugin.Chromecast.dll"
 changelog: >
-  0.1.6.0-saffsd: Fork of 0.1.6.0 with version suffix for identification.
+  0.1.6.1: saffsd fork. Fixes two faults found casting to real hardware: an async void heartbeat failure that could terminate the whole Jellyfin process, and Dolby (AC-3/E-AC-3) audio that stopped at 0 ms because it was stream-copied into HLS. Built for Jellyfin 12.0.
 
   0.1.6.0: A Chromecast that is switched off or unplugged is now noticed within seconds: the settings page shows its real status and it leaves the cast menu, also when it has a custom name. The ready screen appears again on the first connect after a Chromecast restarted. The TV goes back to the ready screen 30 seconds after showing a movie's details instead of staying on them. A video you move from the app's player to the Chromecast keeps playing when you close the player. Every command to a Chromecast now has a time limit, so a device that stops answering can no longer leave the app waiting. New setting: skip the Chromecast's network speed test for a faster start on fast, steady networks (off by default). Works on Jellyfin 12.0, 12.1 and 12.2.
 

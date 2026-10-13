@@ -9,11 +9,11 @@
     "imageUrl": "https://raw.githubusercontent.com/saffsd/jellyfin-plugin-chromecast/main/assets/logo.jpg",
     "versions": [
       {
-        "version": "0.1.6.0-saffsd",
-        "changelog": "Fork of 0.1.6.0 with version suffix for identification.",
+        "version": "0.1.6.1",
+        "changelog": "saffsd fork. Fixes two faults found casting to real hardware: an async void heartbeat failure that could terminate the whole Jellyfin process, and Dolby (AC-3/E-AC-3) audio that stopped at 0 ms because it was stream-copied into HLS. Built for Jellyfin 12.0.",
         "targetAbi": "12.0.0.0",
-        "sourceUrl": "https://github.com/saffsd/jellyfin-plugin-chromecast/releases/download/v0.1.6.0-saffsd/Jellyfin.Plugin.Chromecast_0.1.6.0-saffsd.zip",
-        "checksum": "4674edfcbfd87f3d4258bf6e23074810",
+        "sourceUrl": "https://github.com/saffsd/jellyfin-plugin-chromecast/releases/download/v0.1.6.1/Jellyfin.Plugin.Chromecast_0.1.6.1.zip",
+        "checksum": "0a7cd19de2b6e32f5dd3ec8a240dabc3",
         "timestamp": "2026-10-13T10:30:00.0000000Z"
       },
       {
