@@ -58,11 +58,24 @@ public sealed class ChromecastSessionController : ISessionController, IAsyncDisp
     /// which <c>System.Text.Json</c>'s built-in <c>Guid</c> converter rejects outright - it only
     /// accepts the canonical dashed format, unlike the more permissive <c>Guid.Parse(string)</c>.
     /// </item>
+    /// <item><see cref="LenientInt64Converter"/> / <see cref="LenientInt32Converter"/> - the
+    /// receiver's own clock arithmetic produces fractional tick counts (observed:
+    /// <c>"PositionTicks":116658329.99999999</c>). <c>PlaybackProgressInfo.PositionTicks</c> is a
+    /// <c>long?</c>, and the built-in converter fails the *entire* payload over it - so a single
+    /// such value silently discarded the whole status message, including a <c>playbackstop</c> that
+    /// then never cleared the session.
+    /// </item>
     /// </list>
     /// </summary>
     private static readonly JsonSerializerOptions ApiJsonOptions = new()
     {
-        Converters = { new JsonStringEnumConverter(), new FlexibleGuidConverter() }
+        Converters =
+        {
+            new JsonStringEnumConverter(),
+            new FlexibleGuidConverter(),
+            new LenientInt64Converter(),
+            new LenientInt32Converter()
+        }
     };
 
     private readonly SessionInfo _session;
@@ -1275,6 +1288,18 @@ public sealed class ChromecastSessionController : ISessionController, IAsyncDisp
 
             // The receiver ignores this while it's playing something, so it's safe to forward always.
             await _connectSdkChannel.SendCommandAsync("DisplayContent", controllingUser.Id, accessToken, _serverAddress, _receiver.Name, new DisplayContentOptions { ItemId = itemId }, transportId).ConfigureAwait(false);
+
+            // Only arm the "show the details, then go back to the ready screen" timer when the
+            // receiver will actually display them. While something is playing it ignores this
+            // command entirely - arming the timer anyway left it set during playback, so once the
+            // 30s elapsed the keep-alive dropped the TV back to the ready screen mid-cast. This
+            // also loses the race with a PlayNow that arrives while this command is in flight:
+            // that PlayNow clears the flag, and setting it here afterwards would re-arm it.
+            if (_receiverHasItem)
+            {
+                return;
+            }
+
             _detailsShownAt = DateTime.UtcNow;
             _showingDetails = true;
         }
@@ -1440,17 +1465,17 @@ public sealed class ChromecastSessionController : ISessionController, IAsyncDisp
             return;
         }
 
-        if (status.Data is { ValueKind: JsonValueKind.Object } data
+        // Only a broadcast that actually *reports* the loaded item may change this: the receiver
+        // also sends broadcasts with ItemId blanked (an end-of-media playbackstop, and its own
+        // volume changes), and treating "blank" as "nothing is loaded" wrongly marked a session
+        // idle - which let the keep-alive drop the receiver back to its ready screen mid-cast.
+        if (status.Type != "playbackstop"
+            && status.Data is { ValueKind: JsonValueKind.Object } data
             && data.TryGetProperty("ItemId", out var itemId)
-            && itemId.ValueKind == JsonValueKind.String)
+            && itemId.ValueKind == JsonValueKind.String
+            && !string.IsNullOrEmpty(itemId.GetString()))
         {
-            _receiverHasItem = !string.IsNullOrEmpty(itemId.GetString());
-        }
-
-        if (status.Type == "playbackstop")
-        {
-            _receiverHasItem = false;
-            _ignoreNextStop = false;
+            _receiverHasItem = true;
         }
 
         var reportedItemId = Guid.Empty;
@@ -1459,6 +1484,16 @@ public sealed class ChromecastSessionController : ISessionController, IAsyncDisp
             && reportedItem.ValueKind == JsonValueKind.String)
         {
             Guid.TryParse(reportedItem.GetString(), out reportedItemId);
+        }
+
+        if (status.Type == "playbackstop")
+        {
+            if (StopsTheItemOnScreen(reportedItemId, _reportedItemId))
+            {
+                _receiverHasItem = false;
+            }
+
+            _ignoreNextStop = false;
         }
 
         if (reportedItemId != Guid.Empty)
@@ -1616,6 +1651,33 @@ public sealed class ChromecastSessionController : ISessionController, IAsyncDisp
         return lastSeenPlaying != Guid.Empty ? lastSeenPlaying : sessionNowPlaying;
     }
 
+    /// <summary>
+    /// Whether a <c>playbackstop</c> broadcast means the item on screen has finished - as opposed
+    /// to being the previous item's stop arriving after the next one has already started, which is
+    /// what the receiver reports during a switch. Clearing the "has an item" flag for a late stop
+    /// marked a playing session idle, and the keep-alive then dropped the TV back to its ready
+    /// screen mid-cast.
+    /// </summary>
+    /// <param name="stopped">The item the stop named (empty when the receiver blanked it).</param>
+    /// <param name="current">The last item the receiver reported actually playing.</param>
+    /// <returns>True if the stop is about the item on screen.</returns>
+    internal static bool StopsTheItemOnScreen(Guid stopped, Guid current)
+    {
+        // A blank id is the receiver's own end-of-media stop, which does mean nothing is left.
+        if (stopped == Guid.Empty)
+        {
+            return true;
+        }
+
+        // Nothing known to be playing, so this stop cannot be contradicting a live item.
+        if (current == Guid.Empty)
+        {
+            return true;
+        }
+
+        return stopped == current;
+    }
+
     private void OnClientDisconnected(object? sender, EventArgs e)
     {
         _logger.LogInformation("Chromecast {Name} disconnected", _receiver.Name);
@@ -1683,4 +1745,56 @@ internal sealed class FlexibleGuidConverter : JsonConverter<Guid>
     {
         writer.WriteStringValue(value.ToString());
     }
+}
+
+/// <summary>
+/// Reads a JSON number into <see cref="long"/> (or null), rounding rather than failing when the
+/// value is fractional. The cast receiver's own clock arithmetic produces values like
+/// <c>116658329.99999999</c>; <c>System.Text.Json</c>'s built-in <c>long</c> converter rejects
+/// those outright, which fails the whole containing payload - so one fractional tick count would
+/// silently discard an entire status message (a <c>playbackstop</c> among them).
+/// </summary>
+internal sealed class LenientInt64Converter : JsonConverter<long>
+{
+    public override long Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.Null)
+        {
+            return 0;
+        }
+
+        if (reader.TryGetInt64(out var exact))
+        {
+            return exact;
+        }
+
+        return reader.TryGetDouble(out var approximate) ? (long)Math.Round(approximate) : 0;
+    }
+
+    public override void Write(Utf8JsonWriter writer, long value, JsonSerializerOptions options)
+        => writer.WriteNumberValue(value);
+}
+
+/// <summary>
+/// The <see cref="int"/> counterpart of <see cref="LenientInt64Converter"/>; see that type for why.
+/// </summary>
+internal sealed class LenientInt32Converter : JsonConverter<int>
+{
+    public override int Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.Null)
+        {
+            return 0;
+        }
+
+        if (reader.TryGetInt32(out var exact))
+        {
+            return exact;
+        }
+
+        return reader.TryGetDouble(out var approximate) ? (int)Math.Round(approximate) : 0;
+    }
+
+    public override void Write(Utf8JsonWriter writer, int value, JsonSerializerOptions options)
+        => writer.WriteNumberValue(value);
 }
