@@ -1056,11 +1056,12 @@ public sealed class ChromecastSessionController : ISessionController, IAsyncDisp
 
     /// <summary>
     /// Called when a Jellyfin client of <paramref name="userId"/> disconnects from its remote
-    /// player (see <see cref="RemoteControlListener"/>). Closes the receiver if that user was the
-    /// one controlling this Chromecast.
+    /// player (see <see cref="RemoteControlListener"/>). Stops playback if that user was the one
+    /// controlling this Chromecast, but leaves the receiver open so a follow-up PlayNow (e.g. the
+    /// user picked a different video) can reuse it immediately instead of re-launching from scratch.
     /// </summary>
     /// <param name="userId">The user whose client disconnected.</param>
-    /// <returns>A task that completes once the receiver is closed or left alone.</returns>
+    /// <returns>A task that completes once playback is stopped.</returns>
     public async Task OnRemoteControlEndedAsync(Guid userId)
     {
         if (_disposed || _appTransportId is null || (userId != _lastControllingUserId && userId != _openedOnConnectFor))
@@ -1070,17 +1071,22 @@ public sealed class ChromecastSessionController : ISessionController, IAsyncDisp
 
         _openedOnConnectFor = Guid.Empty;
 
-        _logger.LogInformation("Controlling client disconnected from {Name}, closing the Jellyfin receiver", _receiver.Name);
+        _logger.LogInformation("Controlling client disconnected from {Name}, stopping playback", _receiver.Name);
         try
         {
             await SendReceiverCommandAsync("Stop", null).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "Error stopping playback on {Name} before closing", _receiver.Name);
+            _logger.LogDebug(ex, "Error stopping playback on {Name}", _receiver.Name);
         }
 
-        await CloseReceiverAppAsync().ConfigureAwait(false);
+        // Deliberately do NOT close the receiver here. The web client sends SessionsStop when the
+        // user picks a different video, then PlayNow for the new one a few seconds later. Closing
+        // the receiver forced a full re-launch (several seconds on the ready screen) before the
+        // new video could start, and any timeout during that re-launch left the TV stuck on the
+        // ready screen. The keep-alive timer closes the receiver after IdleCloseAfter if the user
+        // actually stopped casting.
     }
 
     /// <summary>

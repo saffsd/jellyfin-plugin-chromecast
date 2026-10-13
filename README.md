@@ -10,7 +10,7 @@ Jellyfin's own cast button only works in Chrome and on Android. This plugin runs
 server instead, finds the Chromecasts on your network and adds them to the cast menu every Jellyfin
 app already has. Pick one, press Play, and it plays on the TV.
 
-> **Status: early public test release (0.1.6.3, saffsd fork).** It works day to day on real Chromecast
+> **Status: early public test release (0.1.6.4, saffsd fork).** It works day to day on real Chromecast
 > hardware with the iOS, macOS and web apps, but it is young. Please
 > [open an issue](https://github.com/saffsd/jellyfin-plugin-chromecast/issues) if something
 > doesn't work.
