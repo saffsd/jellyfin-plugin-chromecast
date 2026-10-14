@@ -17,7 +17,7 @@ category: "General"
 artifacts:
 - "Jellyfin.Plugin.Chromecast.dll"
 changelog: >
-  0.1.6.4: saffsd fork. Switching to a different video while one is already casting no longer drops the TV back to the ready screen. The web client sends SessionsStop when the user picks a new video, and the plugin was closing the receiver entirely - forcing a full re-launch (several seconds on the ready screen) before the new video could start. Now it stops playback but leaves the receiver open so the next PlayNow reuses it immediately. Built for Jellyfin 12.0.
+  0.1.6.4: saffsd fork. Picking Disconnect no longer leaves the TV sitting on the Jellyfin "ready to cast" screen. The plugin stops playback and then closes the receiver once the client has stayed away for ten seconds; closing it the instant the client disconnects put the TV back on the ready screen when the user was only picking a different video. Built for Jellyfin 12.0.
 
   0.1.6.3: saffsd fork. Switching to a different video while one is already casting no longer knocks the TV back to the ready screen a few seconds in. Three separate faults in how the Chromecast's own status reports were read, each of which made Jellyfin think nothing was playing and put the ready screen up over the top of live playback. Built for Jellyfin 12.0.
 

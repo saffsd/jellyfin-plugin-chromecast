@@ -127,6 +127,14 @@ public sealed class ChromecastSessionController : ISessionController, IAsyncDisp
 
     private static readonly TimeSpan IdleCloseAfter = TimeSpan.FromMinutes(30);
 
+    /// <summary>
+    /// How long to wait after a client disconnects from its remote player before closing the
+    /// receiver. Long enough that the brief disconnect a web client makes while the user picks a
+    /// different video does not close it (that would put the TV back on the ready screen mid-flow),
+    /// short enough that a real Disconnect clears the TV promptly.
+    /// </summary>
+    private static readonly TimeSpan DisconnectCloseAfter = TimeSpan.FromSeconds(10);
+
     private Guid _lastControllingUserId;
 
     private int _missedKeepAlives;
@@ -155,6 +163,14 @@ public sealed class ChromecastSessionController : ISessionController, IAsyncDisp
     private Guid _openedOnConnectFor;
 
     private long _lastActivityTicks = DateTime.UtcNow.Ticks;
+
+    /// <summary>
+    /// When the controlling client last disconnected from its remote player, or 0 when it has not
+    /// (or has since done something). The keep-alive closes the receiver once this is older than
+    /// <see cref="DisconnectCloseAfter"/>; any activity clears it. See
+    /// <see cref="OnRemoteControlEndedAsync"/>.
+    /// </summary>
+    private long _disconnectedAtTicks;
 
     /// <summary>
     /// Whether the receiver has an item loaded (playing or paused). Only cleared on positive
@@ -374,7 +390,14 @@ public sealed class ChromecastSessionController : ISessionController, IAsyncDisp
         }
     }
 
-    private void MarkActivity() => Interlocked.Exchange(ref _lastActivityTicks, DateTime.UtcNow.Ticks);
+    private void MarkActivity()
+    {
+        Interlocked.Exchange(ref _lastActivityTicks, DateTime.UtcNow.Ticks);
+
+        // Anything the client does after disconnecting means it is still driving this receiver,
+        // so a pending disconnect-close must not fire.
+        Interlocked.Exchange(ref _disconnectedAtTicks, 0);
+    }
 
     private void StopAppKeepAlive()
     {
@@ -501,6 +524,20 @@ public sealed class ChromecastSessionController : ISessionController, IAsyncDisp
     {
         try
         {
+            // Checked before the ping so it runs on every tick: the ping-failure path below
+            // returns early, and a skipped tick delayed a Disconnect by another 5s.
+            var disconnectedAt = Interlocked.Read(ref _disconnectedAtTicks);
+            if (ShouldCloseAfterDisconnect(disconnectedAt, DateTime.UtcNow))
+            {
+                // The client disconnected and has not come back (see OnRemoteControlEndedAsync).
+                // Without this the receiver stays open on its ready screen forever, because it
+                // disables CAF's own idle timeout.
+                _logger.LogInformation("Client disconnected from {Name} and did not return, closing the Jellyfin receiver", _receiver.Name);
+                MarkActivity();
+                await CloseReceiverAppAsync().ConfigureAwait(false);
+                return;
+            }
+
             // Re-issuing CONNECT to the app's own transport alone was NOT enough to prevent the
             // device disconnecting ~28-30s after a cast (confirmed by testing) - that's a
             // non-standard use of the connection namespace the receiver *platform* likely doesn't
@@ -1081,12 +1118,12 @@ public sealed class ChromecastSessionController : ISessionController, IAsyncDisp
             _logger.LogDebug(ex, "Error stopping playback on {Name}", _receiver.Name);
         }
 
-        // Deliberately do NOT close the receiver here. The web client sends SessionsStop when the
-        // user picks a different video, then PlayNow for the new one a few seconds later. Closing
-        // the receiver forced a full re-launch (several seconds on the ready screen) before the
-        // new video could start, and any timeout during that re-launch left the TV stuck on the
-        // ready screen. The keep-alive timer closes the receiver after IdleCloseAfter if the user
-        // actually stopped casting.
+        // Do not close the receiver straight away. A web client also briefly drops this
+        // subscription while the user picks a different video, and closing on that put the TV back
+        // on the ready screen mid-flow. Instead arm the disconnect-close: the keep-alive closes the
+        // receiver once DisconnectCloseAfter has passed with no further activity, so a real
+        // Disconnect does clear the TV and a momentary blip does not.
+        Interlocked.Exchange(ref _disconnectedAtTicks, DateTime.UtcNow.Ticks);
     }
 
     /// <summary>
@@ -1682,6 +1719,25 @@ public sealed class ChromecastSessionController : ISessionController, IAsyncDisp
         }
 
         return stopped == current;
+    }
+
+    /// <summary>
+    /// Whether a receiver should be closed because its controlling client disconnected and has not
+    /// come back. The grace period is what keeps the momentary disconnect a web client makes while
+    /// the user picks a different video from closing the receiver - that put the TV back on its
+    /// ready screen mid-flow - while still clearing the TV after a real Disconnect.
+    /// </summary>
+    /// <param name="disconnectedAtTicks">When the client disconnected, or 0 if it has not (or has since done something).</param>
+    /// <param name="now">The current time.</param>
+    /// <returns>True if the receiver should be closed.</returns>
+    internal static bool ShouldCloseAfterDisconnect(long disconnectedAtTicks, DateTime now)
+    {
+        if (disconnectedAtTicks <= 0)
+        {
+            return false;
+        }
+
+        return now - new DateTime(disconnectedAtTicks, DateTimeKind.Utc) > DisconnectCloseAfter;
     }
 
     private void OnClientDisconnected(object? sender, EventArgs e)
