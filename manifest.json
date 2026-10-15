@@ -13,7 +13,7 @@
         "changelog": "saffsd fork. Two more faults found casting to real hardware. A cast that runs to the end of a clip no longer leaves a second session stuck reporting the finished item as still playing - the cast receiver reports its own playback to Jellyfin separately, and that report carries the same blanked item id the plugin's own handling already works around, so the plugin now clears that session too once it knows what stopped. Starting a clip while one is already playing also stops the outgoing item first, which makes the receiver much less likely to be left on its \"Ready to cast\" screen with the new item playing underneath. That second one is a workaround for a bug in the Jellyfin cast receiver itself (jellyfin/jellyfin-chromecast): it reduces how often it happens but does not eliminate it. Built for Jellyfin 12.0.",
         "targetAbi": "12.0.0.0",
         "sourceUrl": "https://github.com/saffsd/jellyfin-plugin-chromecast/releases/download/v0.1.6.5/Jellyfin.Plugin.Chromecast_0.1.6.5.zip",
-        "checksum": "45c3feeee2d2a05ab3a326fad2e36177",
+        "checksum": "1a9b8bd0199d11d0428460fa5b2788f1",
         "timestamp": "2026-10-15T10:00:00.0000000Z"
       },
       {
