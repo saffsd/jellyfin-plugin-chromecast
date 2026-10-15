@@ -154,6 +154,12 @@ public sealed class ChromecastSessionController : ISessionController, IAsyncDisp
     /// </summary>
     private volatile bool _ignoreNextStop;
 
+    /// <summary>
+    /// Completes when the receiver reports the stop the plugin asked for before replacing the item
+    /// on screen; see <see cref="StopBeforeReplacingAsync"/>.
+    /// </summary>
+    private TaskCompletionSource<bool>? _awaitingStop;
+
     /// <summary>Lets one PlayNow reach the receiver at a time; see <see cref="PlayRequestGate{TRequest}"/>.</summary>
     private readonly PlayRequestGate<PlayRequest> _playGate = new(TimeSpan.FromSeconds(15));
 
@@ -666,6 +672,46 @@ public sealed class ChromecastSessionController : ISessionController, IAsyncDisp
 
     private void ForgetPlayRequests() => _playGate.Clear();
 
+    /// <summary>
+    /// Stops whatever the receiver is playing, and waits for it to report the stop, before a new
+    /// item is loaded over the top of it.
+    /// <para>
+    /// Workaround for a bug in the Jellyfin cast receiver. When a PlayNow replaces media that is
+    /// already playing, CAF aborts the outgoing media and the receiver's ABORT handler calls its
+    /// own <c>onStop()</c>, which sets the receiver's UI status to <c>waiting</c> - the "Ready to
+    /// cast" screen. That lands <em>after</em> the new item has loaded and set its own status, so
+    /// the screen stays on "Ready to cast": the receiver's stylesheet hides the video element with
+    /// <c>opacity: 0</c> under that status, so the new item plays with the picture hidden while
+    /// still reporting progress, and the server keeps showing it as playing. Stopping first, and
+    /// letting the receiver's stop land, means its <c>onStop()</c> has already run by the time the
+    /// new load sets the status, so the new one sticks and the video is visible.
+    /// </para>
+    /// </summary>
+    /// <returns>A task that completes once the receiver reports the stop, or the wait times out.</returns>
+    private async Task StopBeforeReplacingAsync()
+    {
+        var reported = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Interlocked.Exchange(ref _awaitingStop, reported);
+
+        try
+        {
+            _logger.LogInformation("Stopping the item on {Name} before loading the next one", _receiver.Name);
+            await SendReceiverCommandAsync("Stop", null).ConfigureAwait(false);
+
+            // The receiver reports the stop within a few hundred ms. Do not hold the new item up
+            // for longer than this if it does not.
+            await Task.WhenAny(reported.Task, Task.Delay(TimeSpan.FromSeconds(2))).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Error stopping playback on {Name} before loading the next item", _receiver.Name);
+        }
+        finally
+        {
+            Interlocked.CompareExchange(ref _awaitingStop, null, reported);
+        }
+    }
+
     private async Task<bool> SendPlayNowAsync(PlayRequest command, List<BaseItemDto> items, User? user, CancellationToken cancellationToken)
     {
         await EnsureAliveAsync().ConfigureAwait(false);
@@ -687,6 +733,11 @@ public sealed class ChromecastSessionController : ISessionController, IAsyncDisp
 
         _logger.LogInformation("Casting {Count} item(s) starting with {ItemName} to {DeviceName}", items.Count, items[0].Name, _receiver.Name);
 
+        // Whether the receiver already has an item loaded, captured before EnsureReceiverAppAsync
+        // marks it as having one. Replacing media that is already playing needs the stop-first
+        // workaround below.
+        var replacingPlayingItem = _receiverHasItem && _reportedItemId != Guid.Empty;
+
         var (transportId, launched) = await EnsureReceiverAppAsync(client, cancellationToken).ConfigureAwait(false);
         if (transportId is null)
         {
@@ -699,6 +750,13 @@ public sealed class ChromecastSessionController : ISessionController, IAsyncDisp
         if (launched)
         {
             await _connectSdkChannel.SendCommandAsync("Identify", controllingUser.Id, accessToken, _serverAddress, _receiver.Name, null, transportId).ConfigureAwait(false);
+        }
+
+        // See StopBeforeReplacingAsync: loading over playing media leaves the receiver's UI stuck
+        // on its "Ready to cast" screen, with the video hidden.
+        if (replacingPlayingItem)
+        {
+            await StopBeforeReplacingAsync().ConfigureAwait(false);
         }
 
         var options = BuildPlayNowOptions(items, command);
@@ -1531,6 +1589,10 @@ public sealed class ChromecastSessionController : ISessionController, IAsyncDisp
 
         if (status.Type == "playbackstop")
         {
+            // Releases a play request waiting for the receiver to confirm it stopped the previous
+            // item; see StopBeforeReplacingAsync.
+            Interlocked.Exchange(ref _awaitingStop, null)?.TrySetResult(true);
+
             if (StopsTheItemOnScreen(reportedItemId, _reportedItemId))
             {
                 _receiverHasItem = false;
@@ -1645,7 +1707,7 @@ public sealed class ChromecastSessionController : ISessionController, IAsyncDisp
             info.MediaSourceId ??= fallback.ToString("N", CultureInfo.InvariantCulture);
         }
 
-        return _sessionManager.OnPlaybackStopped(new PlaybackStopInfo
+        var stopped = _sessionManager.OnPlaybackStopped(new PlaybackStopInfo
         {
             ItemId = info.ItemId,
             SessionId = _session.Id,
@@ -1653,6 +1715,51 @@ public sealed class ChromecastSessionController : ISessionController, IAsyncDisp
             PlaySessionId = info.PlaySessionId,
             PositionTicks = info.PositionTicks
         });
+
+        ClearReceiverReportedSession(info.ItemId);
+        return stopped;
+    }
+
+    /// <summary>
+    /// Clears the receiver's own Jellyfin session if it is still showing the item that just
+    /// stopped.
+    /// <para>
+    /// The receiver reports its playback to Jellyfin directly as well, on a second session under
+    /// its own device id, and its end-of-media stop carries the same blanked <c>ItemId</c> -
+    /// Jellyfin resolves the item by id, finds nothing, and returns before clearing
+    /// <c>NowPlayingItem</c>. That second session is then left reporting the finished clip at its
+    /// end position while the TV is back on its ready screen. The receiver makes that call over
+    /// HTTP, so the plugin cannot fix the call itself; it can only clean up after it, which is
+    /// what this does. The session is matched by the device's own address, so only this receiver's
+    /// session is touched.
+    /// </para>
+    /// </summary>
+    /// <param name="itemId">The item that just stopped.</param>
+    private void ClearReceiverReportedSession(Guid itemId)
+    {
+        if (itemId == Guid.Empty)
+        {
+            return;
+        }
+
+        var address = _receiver.DeviceUri.Host;
+        foreach (var session in _sessionManager.Sessions)
+        {
+            if (session.Id == _session.Id
+                || !string.Equals(session.Client, "Chromecast", StringComparison.Ordinal)
+                || !string.Equals(session.RemoteEndPoint, address, StringComparison.Ordinal)
+                || session.NowPlayingItem?.Id != itemId)
+            {
+                continue;
+            }
+
+            _logger.LogInformation("Clearing the receiver's own session on {Name}, which still reported {ItemName} as playing", _receiver.Name, session.NowPlayingItem.Name);
+            _ = _sessionManager.OnPlaybackStopped(new PlaybackStopInfo
+            {
+                ItemId = itemId,
+                SessionId = session.Id
+            });
+        }
     }
 
     private PlaybackProgressInfo? DeserializeProgress(JsonElement? data)
